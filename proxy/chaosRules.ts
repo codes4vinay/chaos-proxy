@@ -9,5 +9,5 @@
 export const chaosRules = {
   delayChance: 0.3, // 30% of requests get an artificial delay
   delayMs: 300, // how long that delay lasts
-  failChance: 0.1, // 10% of requests get a fake failure instead of being forwarded
+  failChance: 0.2, // 20% of requests get a fake failure instead of being forwarded
 };
