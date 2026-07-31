@@ -20,6 +20,7 @@ import http from "http";
 import { chaosRules } from "./chaosRules";
 import { recordMetric, getStats } from "./metrics";
 import { checkAssertions } from "./assertions";
+import { getCurrentIntensity } from "./degradation";
 
 const TARGET_HOST = "localhost";
 const TARGET_PORT = 4000;
@@ -46,20 +47,25 @@ const server = http.createServer(async (clientReq, clientRes) => {
   }
 
   // --- CHAOS CHECK #1: Fake failure ---
-  // Roll the dice against failChance. If it hits, respond immediately
-  // with a fake error and never even contact the target service.
-  // This simulates a backend that's completely down or rejecting requests.
-  if (Math.random() < chaosRules.failChance) {
+  // Roll the dice against failChance, scaled by the current ramp
+  // intensity (0 to 1). So the effective failure probability isn't
+  // flat — it smoothly rises and falls over the ramp cycle, peaking
+  // at exactly failChance and dropping toward 0 elsewhere in the cycle.
+  // If it hits, respond immediately with a fake error and never even
+  // contact the target service — simulating a backend that's
+  // completely down or rejecting requests.
+  if (Math.random() < chaosRules.failChance * getCurrentIntensity()) {
     clientRes.writeHead(500, { "Content-Type": "text/plain" });
     clientRes.end("Injected failure");
-    recordMetric(Date.now() - startTime, true); // NEW: log this as a failure
+    recordMetric(Date.now() - startTime, true); // log this as a failure
     return; // stop here — do not forward this request at all
   }
 
   // --- CHAOS CHECK #2: Artificial delay ---
-  // Roll the dice against delayChance. If it hits, pause before
-  // continuing, simulating a slow network or an overloaded backend.
-  if (Math.random() < chaosRules.delayChance) {
+  // Same idea as above, applied to delay chance instead of failure
+  // chance — the probability of injecting a delay also rises and
+  // falls with the ramp, rather than staying at a constant rate.
+  if (Math.random() < chaosRules.delayChance * getCurrentIntensity()) {
     await sleep(chaosRules.delayMs);
   }
 
