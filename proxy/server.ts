@@ -5,9 +5,10 @@
  * (e.g. curl, Postman, or a real app) and the target service running
  * on port 4000.
  *
- * Right now it forwards every request through unmodified and streams
- * the response back. Fault injection (delays, failures) is layered
- * on top of this pass-through logic separately.
+ * Before forwarding a request, it consults chaosRules to decide
+ * whether to inject a fake failure, an artificial delay, or let the
+ * request pass through untouched. This is what turns a plain proxy
+ * into a "chaos" proxy.
  *
  * Built using Node's built-in `http` module directly (no `http-proxy`
  * library) so the actual request/response streaming is handled
@@ -15,11 +16,38 @@
  */
 
 import http from "http";
+import { chaosRules } from "./chaosRules";
 
 const TARGET_HOST = "localhost";
 const TARGET_PORT = 4000;
 
-const server = http.createServer((clientReq, clientRes) => {
+/**
+ * Simple promise-based delay helper.
+ * Used to simulate network/service latency before forwarding a request.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const server = http.createServer(async (clientReq, clientRes) => {
+  // --- CHAOS CHECK #1: Fake failure ---
+  // Roll the dice against failChance. If it hits, respond immediately
+  // with a fake error and never even contact the target service.
+  // This simulates a backend that's completely down or rejecting requests.
+  if (Math.random() < chaosRules.failChance) {
+    clientRes.writeHead(500, { "Content-Type": "text/plain" });
+    clientRes.end("Injected failure");
+    return; // stop here — do not forward this request at all
+  }
+
+  // --- CHAOS CHECK #2: Artificial delay ---
+  // Roll the dice against delayChance. If it hits, pause before
+  // continuing, simulating a slow network or an overloaded backend.
+  if (Math.random() < chaosRules.delayChance) {
+    await sleep(chaosRules.delayMs);
+  }
+
+  // --- Normal pass-through logic (unchanged from before) ---
   // Build the options describing WHERE to forward this request to.
   // We copy the method, path, and headers from the original request
   // so the target service sees (almost) the same request the client sent.
