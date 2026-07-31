@@ -11,6 +11,12 @@
  * failure) is recorded to metrics.ts so real latency/failure stats
  * can be queried via /stats.
  *
+ * chaosRules can now also be inspected and updated at runtime via
+ * GET/POST /rules, without editing chaosRules.ts or restarting the
+ * proxy — this is the beginning of the "control API," built directly
+ * into this server rather than as a separate process, since a
+ * separate process wouldn't share this in-memory chaosRules object.
+ *
  * Built using Node's built-in `http` module directly (no `http-proxy`
  * library) so the actual request/response streaming is handled
  * explicitly rather than hidden behind a library.
@@ -21,7 +27,6 @@ import { chaosRules } from "./chaosRules";
 import { recordMetric, getStats } from "./metrics";
 import { checkAssertions, getTriggerHistory } from "./assertions";
 import { getCurrentIntensity } from "./degradation";
-
 
 const TARGET_HOST = "localhost";
 const TARGET_PORT = 4000;
@@ -35,12 +40,12 @@ function sleep(ms: number): Promise<void> {
 }
 
 const server = http.createServer(async (clientReq, clientRes) => {
-  // NEW: track when this request started, so we can measure total
+  // Track when this request started, so we can measure total
   // duration (including any chaos delay) once it finishes.
   const startTime = Date.now();
 
-  // NEW: Route to inspect current stats without
-  // needing a separate control API yet (that comes in a later phase).
+  // Route to inspect current stats — a quick way to check system
+  // health without needing a dashboard yet.
   if (clientReq.url === "/stats") {
     clientRes.writeHead(200, { "Content-Type": "application/json" });
     clientRes.end(JSON.stringify(getStats()));
@@ -56,6 +61,52 @@ const server = http.createServer(async (clientReq, clientRes) => {
     return;
   }
 
+  // --- CONTROL: read current chaos config ---
+  // GET /rules returns the live chaosRules object as JSON, so you
+  // can check the current config without opening chaosRules.ts.
+  if (clientReq.url === "/rules" && clientReq.method === "GET") {
+    clientRes.writeHead(200, { "Content-Type": "application/json" });
+    clientRes.end(JSON.stringify(chaosRules));
+    return;
+  }
+
+  // --- CONTROL: update chaos config at runtime ---
+  // POST /rules accepts a partial JSON body, e.g. { "failChance": 0.3 },
+  // and merges it into the live chaosRules object. Because chaosRules
+  // is a shared, mutable object that every request reads from, this
+  // change takes effect immediately on the very next request — no
+  // restart needed.
+  
+  if (clientReq.url === "/rules" && clientReq.method === "POST") {
+    // Unlike GET requests, POST requests carry a body — but Node's
+    // raw http module doesn't parse it for us automatically (Express
+    // normally does this behind the scenes). The body arrives as a
+    // stream of chunks over time, so we accumulate it manually.
+    let body = "";
+
+    clientReq.on("data", (chunk) => {
+      body += chunk;
+    });
+
+    clientReq.on("end", () => {
+      try {
+        const updates = JSON.parse(body);
+
+        // Object.assign merges only the fields that were sent,
+        // leaving any fields not included in the request untouched.
+        Object.assign(chaosRules, updates);
+
+        clientRes.writeHead(200, { "Content-Type": "application/json" });
+        clientRes.end(JSON.stringify(chaosRules));
+      } catch (err) {
+        // Body wasn't valid JSON — fail clearly instead of crashing.
+        clientRes.writeHead(400, { "Content-Type": "application/json" });
+        clientRes.end(JSON.stringify({ error: "Invalid JSON body" }));
+      }
+    });
+
+    return;
+  }
 
   // --- CHAOS CHECK #1: Fake failure ---
   // Roll the dice against failChance, scaled by the current ramp
@@ -101,7 +152,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
     // Stream the target's response body straight through to the client,
     // instead of loading it all into memory first.
     targetRes.pipe(clientRes);
-    recordMetric(Date.now() - startTime, false); // NEW: log this as a success
+    recordMetric(Date.now() - startTime, false); // log this as a success
   });
 
   // If the target service is down or unreachable, don't crash —
@@ -110,7 +161,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
     console.error("Proxy request error:", err.message);
     clientRes.writeHead(502, { "Content-Type": "text/plain" });
     clientRes.end("Bad Gateway - target service unreachable");
-    recordMetric(Date.now() - startTime, true); // NEW: log this as a failure too
+    recordMetric(Date.now() - startTime, true); // log this as a failure too
   });
 
   // Stream the incoming request body (from the client) onward to the
@@ -120,6 +171,10 @@ const server = http.createServer(async (clientReq, clientRes) => {
 });
 
 server.listen(3000, () => {
-  setInterval(checkAssertions, 2000);
   console.log("Chaos proxy running on :3000 -> forwarding to :4000");
 });
+
+// Runs every 2 seconds, independent of the server's own request
+// handling, to continuously monitor live traffic and auto-disable
+// chaos if safety thresholds are breached.
+setInterval(checkAssertions, 2000);
