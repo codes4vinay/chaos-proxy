@@ -7,8 +7,9 @@
  *
  * Before forwarding a request, it consults chaosRules to decide
  * whether to inject a fake failure, an artificial delay, or let the
- * request pass through untouched. This is what turns a plain proxy
- * into a "chaos" proxy.
+ * request pass through untouched. Every outcome (success, delay,
+ * failure) is recorded to metrics.ts so real latency/failure stats
+ * can be queried via /stats.
  *
  * Built using Node's built-in `http` module directly (no `http-proxy`
  * library) so the actual request/response streaming is handled
@@ -17,6 +18,7 @@
 
 import http from "http";
 import { chaosRules } from "./chaosRules";
+import { recordMetric, getStats } from "./metrics"; // NEW
 
 const TARGET_HOST = "localhost";
 const TARGET_PORT = 4000;
@@ -30,6 +32,18 @@ function sleep(ms: number): Promise<void> {
 }
 
 const server = http.createServer(async (clientReq, clientRes) => {
+  // NEW: track when this request started, so we can measure total
+  // duration (including any chaos delay) once it finishes.
+  const startTime = Date.now();
+
+  // NEW: quick shortcut route to inspect current stats without
+  // needing a separate control API yet (that comes in a later phase).
+  if (clientReq.url === "/stats") {
+    clientRes.writeHead(200, { "Content-Type": "application/json" });
+    clientRes.end(JSON.stringify(getStats()));
+    return;
+  }
+
   // --- CHAOS CHECK #1: Fake failure ---
   // Roll the dice against failChance. If it hits, respond immediately
   // with a fake error and never even contact the target service.
@@ -37,6 +51,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
   if (Math.random() < chaosRules.failChance) {
     clientRes.writeHead(500, { "Content-Type": "text/plain" });
     clientRes.end("Injected failure");
+    recordMetric(Date.now() - startTime, true); // NEW: log this as a failure
     return; // stop here — do not forward this request at all
   }
 
@@ -68,6 +83,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
     // Stream the target's response body straight through to the client,
     // instead of loading it all into memory first.
     targetRes.pipe(clientRes);
+    recordMetric(Date.now() - startTime, false); // NEW: log this as a success
   });
 
   // If the target service is down or unreachable, don't crash —
@@ -76,6 +92,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
     console.error("Proxy request error:", err.message);
     clientRes.writeHead(502, { "Content-Type": "text/plain" });
     clientRes.end("Bad Gateway - target service unreachable");
+    recordMetric(Date.now() - startTime, true); // NEW: log this as a failure too
   });
 
   // Stream the incoming request body (from the client) onward to the
