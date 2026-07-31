@@ -8,7 +8,7 @@
  *
  * This is what separates a real chaos-engineering tool from a blind
  * fault injector: it's not just capable of breaking things, it also
- * knows when to stop.
+ * knows when to stop — and remembers that it did, and why.
  */
 
 import { getStats } from "./metrics";
@@ -23,6 +23,22 @@ const MAX_FAILURE_RATE = 0.3; // 30%
 // Tracks whether we've already auto-disabled chaos, so we don't spam
 // the console with the same warning every 2 seconds once triggered.
 let hasTriggered = false;
+
+/**
+ * Shape of a single recorded trigger event — a snapshot of what the
+ * system looked like at the moment chaos was auto-disabled, and why.
+ */
+interface TriggerEvent {
+  timestamp: number;
+  reason: string;
+  p99: number;
+  failureRate: number;
+}
+
+// In-memory log of every time an assertion has fired. This is what
+// turns a fleeting console.log into an actual queryable audit trail —
+// exposed later via a /history endpoint in server.ts.
+const triggerHistory: TriggerEvent[] = [];
 
 /**
  * Checks current system health against the defined thresholds.
@@ -48,10 +64,34 @@ export function checkAssertions(): void {
 
     hasTriggered = true;
 
+    const reason = p99TooHigh
+      ? "p99 latency too high"
+      : "failure rate too high";
+
+    // Log it for immediate visibility while developing...
     console.log("🚨 Assertion violated — chaos auto-disabled:", {
       p99: stats.p99,
       failureRate: stats.failureRate,
-      reason: p99TooHigh ? "p99 latency too high" : "failure rate too high",
+      reason,
+    });
+
+    // ...and also persist it in memory so it can be looked back on
+    // later via /history, rather than only existing as a log line
+    // that scrolls away.
+    triggerHistory.push({
+      timestamp: Date.now(),
+      reason,
+      p99: stats.p99,
+      failureRate: stats.failureRate,
     });
   }
+}
+
+/**
+ * Returns the full history of assertion triggers recorded so far —
+ * an audit trail of every time chaos was automatically shut off,
+ * and why.
+ */
+export function getTriggerHistory(): TriggerEvent[] {
+  return triggerHistory;
 }

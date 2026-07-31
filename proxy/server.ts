@@ -19,8 +19,9 @@
 import http from "http";
 import { chaosRules } from "./chaosRules";
 import { recordMetric, getStats } from "./metrics";
-import { checkAssertions } from "./assertions";
+import { checkAssertions, getTriggerHistory } from "./assertions";
 import { getCurrentIntensity } from "./degradation";
+
 
 const TARGET_HOST = "localhost";
 const TARGET_PORT = 4000;
@@ -38,13 +39,23 @@ const server = http.createServer(async (clientReq, clientRes) => {
   // duration (including any chaos delay) once it finishes.
   const startTime = Date.now();
 
-  // NEW: quick shortcut route to inspect current stats without
+  // NEW: Route to inspect current stats without
   // needing a separate control API yet (that comes in a later phase).
   if (clientReq.url === "/stats") {
     clientRes.writeHead(200, { "Content-Type": "application/json" });
     clientRes.end(JSON.stringify(getStats()));
     return;
   }
+
+  // Route to inspect the assertion engine's trigger history —
+  // every time chaos was auto-disabled due to breaching a threshold,
+  // along with why and what the metrics looked like at that moment.
+  if (clientReq.url === "/history") {
+    clientRes.writeHead(200, { "Content-Type": "application/json" });
+    clientRes.end(JSON.stringify(getTriggerHistory()));
+    return;
+  }
+
 
   // --- CHAOS CHECK #1: Fake failure ---
   // Roll the dice against failChance, scaled by the current ramp
