@@ -18,7 +18,8 @@
 
 import http from "http";
 import { chaosRules } from "./chaosRules";
-import { recordMetric, getStats } from "./metrics"; // NEW
+import { recordMetric, getStats } from "./metrics";
+import { checkAssertions } from "./assertions";
 
 const TARGET_HOST = "localhost";
 const TARGET_PORT = 4000;
@@ -102,5 +103,6 @@ const server = http.createServer(async (clientReq, clientRes) => {
 });
 
 server.listen(3000, () => {
+  setInterval(checkAssertions, 2000);
   console.log("Chaos proxy running on :3000 -> forwarding to :4000");
 });
