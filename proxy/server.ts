@@ -184,9 +184,11 @@ const server = http.createServer(async (clientReq, clientRes) => {
   // --- ACTION: run a burst of test requests against ourselves ---
   // Lets the dashboard trigger traffic directly, instead of the user
   // needing a separate curl loop in a terminal. Fires `count` requests
-  // at our own /path (on this same proxy, port 3000), spaced by
-  // intervalMs, so they pass through the exact same chaos logic as
-  // any other request and show up live on the dashboard as they run.
+  // at our own /path (on this same proxy, port 3000), either spaced
+  // out sequentially (concurrent: false) or all at once as a genuine
+  // burst (concurrent: true) — so you can test both steady drip
+  // traffic and real concurrent load against the same chaos/metrics
+  // pipeline.
   if (clientReq.url === "/run-test" && clientReq.method === "POST") {
     let body = "";
 
@@ -200,32 +202,48 @@ const server = http.createServer(async (clientReq, clientRes) => {
           path = "/hello",
           count = 10,
           intervalMs = 200,
+          concurrent = false, // NEW: user-chosen toggle
         } = JSON.parse(body || "{}");
 
-        // Respond immediately — the burst runs in the background.
-        // The dashboard will see each request's outcome arrive live
-        // via Socket.IO as it completes, same as any other traffic.
         clientRes.writeHead(200, { "Content-Type": "application/json" });
-        clientRes.end(JSON.stringify({ started: true, count, path }));
+        clientRes.end(
+          JSON.stringify({ started: true, count, path, concurrent }),
+        );
 
-        // Fire the requests one at a time, waiting intervalMs between
-        // each, targeting our own proxy (localhost:3000) so they go
-        // through the full chaos/metrics/assertion pipeline normally.
-        (async () => {
+        const fireOne = () => {
+          http
+            .get(`http://localhost:3000${path}`, (res) => {
+              res.resume(); // drain the response body so it doesn't hang open
+            })
+            .on("error", () => {
+              // Individual connection errors here are ignored — any
+              // real failure is already tracked via recordMetric()
+              // inside the main handler itself.
+            });
+        };
+
+        if (concurrent) {
+          // CONCURRENT MODE: fire all `count` requests in one tight
+          // loop, with no await between them — since http.get() is
+          // non-blocking, this sends them essentially all at once,
+          // letting them race through the proxy simultaneously. This
+          // is what actually stress-tests whether metrics.ts and
+          // assertions.ts hold up correctly under real concurrent
+          // writes, not just sequential ones.
           for (let i = 0; i < count; i++) {
-            http
-              .get(`http://localhost:3000${path}`, (res) => {
-                res.resume(); // drain the response body so it doesn't hang open
-              })
-              .on("error", () => {
-                // Individual connection errors here are ignored —
-                // any real failure is already tracked via
-                // recordMetric() inside the main handler itself.
-              });
-
-            await sleep(intervalMs);
+            fireOne();
           }
-        })();
+        } else {
+          // SEQUENTIAL MODE (previous behavior): one request, wait
+          // intervalMs, then the next — simulates steady, spaced-out
+          // traffic rather than a burst.
+          (async () => {
+            for (let i = 0; i < count; i++) {
+              fireOne();
+              await sleep(intervalMs);
+            }
+          })();
+        }
       } catch (err) {
         clientRes.writeHead(400, { "Content-Type": "application/json" });
         clientRes.end(JSON.stringify({ error: "Invalid JSON body" }));
