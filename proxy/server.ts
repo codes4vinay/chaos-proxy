@@ -12,10 +12,11 @@
  * can be queried via /stats.
  *
  * chaosRules can now also be inspected and updated at runtime via
- * GET/POST /rules, without editing chaosRules.ts or restarting the
- * proxy — this is the beginning of the "control API," built directly
- * into this server rather than as a separate process, since a
- * separate process wouldn't share this in-memory chaosRules object.
+ * GET/POST /rules, and the target backend itself can be changed at
+ * runtime via GET/POST /target — without editing code or restarting
+ * the proxy. This is the control API, built directly into this
+ * server rather than as a separate process, since a separate
+ * process wouldn't share these in-memory config objects.
  *
  * A Socket.IO server is also attached to this same HTTP server, so
  * every request outcome (success, delay, failure) is pushed live to
@@ -36,8 +37,13 @@ import { recordMetric, getStats } from "./metrics";
 import { checkAssertions, getTriggerHistory } from "./assertions";
 import { getCurrentIntensity } from "./degradation";
 
-const TARGET_HOST = "localhost";
-const TARGET_PORT = 4000;
+// Mutable target config, controllable at runtime via /target — same
+// pattern as chaosRules being controllable via /rules. Lets the
+// dashboard point this proxy at any backend without editing code.
+const targetConfig = {
+  host: "localhost",
+  port: 4000,
+};
 
 /**
  * Simple promise-based delay helper.
@@ -48,6 +54,26 @@ function sleep(ms: number): Promise<void> {
 }
 
 const server = http.createServer(async (clientReq, clientRes) => {
+  // Allow the dashboard (running on a different port/origin) to call
+  // this API. Raw http doesn't handle CORS automatically the way
+  // Express does, so we set this header manually on every response.
+  clientRes.setHeader("Access-Control-Allow-Origin", "*");
+
+  // Handle CORS preflight requests. Browsers automatically send an
+  // OPTIONS request before certain cross-origin requests (like our
+  // POST /rules and POST /target calls with a JSON body), asking
+  // permission before sending the real request. We must respond
+  // with the allowed methods/headers here, or the browser blocks
+  // the actual request entirely — even though our real POST/GET
+  // handlers would have worked fine.
+  if (clientReq.method === "OPTIONS") {
+    clientRes.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    clientRes.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    clientRes.writeHead(200);
+    clientRes.end();
+    return;
+  }
+
   // Track when this request started, so we can measure total
   // duration (including any chaos delay) once it finishes.
   const startTime = Date.now();
@@ -84,7 +110,6 @@ const server = http.createServer(async (clientReq, clientRes) => {
   // is a shared, mutable object that every request reads from, this
   // change takes effect immediately on the very next request — no
   // restart needed.
-
   if (clientReq.url === "/rules" && clientReq.method === "POST") {
     // Unlike GET requests, POST requests carry a body — but Node's
     // raw http module doesn't parse it for us automatically (Express
@@ -108,6 +133,43 @@ const server = http.createServer(async (clientReq, clientRes) => {
         clientRes.end(JSON.stringify(chaosRules));
       } catch (err) {
         // Body wasn't valid JSON — fail clearly instead of crashing.
+        clientRes.writeHead(400, { "Content-Type": "application/json" });
+        clientRes.end(JSON.stringify({ error: "Invalid JSON body" }));
+      }
+    });
+
+    return;
+  }
+
+  // --- CONTROL: read current target config ---
+  // GET /target returns which backend this proxy is currently
+  // forwarding requests to.
+  if (clientReq.url === "/target" && clientReq.method === "GET") {
+    clientRes.writeHead(200, { "Content-Type": "application/json" });
+    clientRes.end(JSON.stringify(targetConfig));
+    return;
+  }
+
+  // --- CONTROL: update target config at runtime ---
+  // POST /target accepts { "host": "...", "port": ... } and merges it
+  // into targetConfig — lets the dashboard point this proxy at a
+  // different backend on the fly, without editing code or restarting.
+  // Same body-reading pattern as POST /rules above.
+  if (clientReq.url === "/target" && clientReq.method === "POST") {
+    let body = "";
+
+    clientReq.on("data", (chunk) => {
+      body += chunk;
+    });
+
+    clientReq.on("end", () => {
+      try {
+        const updates = JSON.parse(body);
+        Object.assign(targetConfig, updates);
+
+        clientRes.writeHead(200, { "Content-Type": "application/json" });
+        clientRes.end(JSON.stringify(targetConfig));
+      } catch (err) {
         clientRes.writeHead(400, { "Content-Type": "application/json" });
         clientRes.end(JSON.stringify({ error: "Invalid JSON body" }));
       }
@@ -148,13 +210,15 @@ const server = http.createServer(async (clientReq, clientRes) => {
     await sleep(chaosRules.delayMs);
   }
 
-  // --- Normal pass-through logic (unchanged from before) ---
+  // --- Normal pass-through logic ---
   // Build the options describing WHERE to forward this request to.
   // We copy the method, path, and headers from the original request
-  // so the target service sees (almost) the same request the client sent.
+  // so the target service sees (almost) the same request the client
+  // sent. hostname/port now read from targetConfig, so changes via
+  // /target take effect on the very next request.
   const options: http.RequestOptions = {
-    hostname: TARGET_HOST,
-    port: TARGET_PORT,
+    hostname: targetConfig.host,
+    port: targetConfig.port,
     path: clientReq.url,
     method: clientReq.method,
     headers: clientReq.headers,
@@ -202,7 +266,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
 });
 
 server.listen(3000, () => {
-  console.log("Chaos proxy running on :3000 -> forwarding to :4000");
+  console.log(`Chaos proxy running on :3000 -> forwarding to : ${targetConfig.host}:${targetConfig.port}`);
 });
 
 // Attach a Socket.IO server to the same underlying HTTP server, so
