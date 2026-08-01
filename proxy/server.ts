@@ -14,9 +14,11 @@
  * chaosRules can now also be inspected and updated at runtime via
  * GET/POST /rules, and the target backend itself can be changed at
  * runtime via GET/POST /target — without editing code or restarting
- * the proxy. This is the control API, built directly into this
- * server rather than as a separate process, since a separate
- * process wouldn't share these in-memory config objects.
+ * the proxy. POST /run-test lets the dashboard trigger a burst of
+ * test traffic directly, without needing a separate terminal/curl
+ * loop. This is the control API, built directly into this server
+ * rather than as a separate process, since a separate process
+ * wouldn't share these in-memory config objects.
  *
  * A Socket.IO server is also attached to this same HTTP server, so
  * every request outcome (success, delay, failure) is pushed live to
@@ -47,7 +49,8 @@ const targetConfig = {
 
 /**
  * Simple promise-based delay helper.
- * Used to simulate network/service latency before forwarding a request.
+ * Used to simulate network/service latency before forwarding a request,
+ * and to space out requests fired by /run-test.
  */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -61,11 +64,11 @@ const server = http.createServer(async (clientReq, clientRes) => {
 
   // Handle CORS preflight requests. Browsers automatically send an
   // OPTIONS request before certain cross-origin requests (like our
-  // POST /rules and POST /target calls with a JSON body), asking
-  // permission before sending the real request. We must respond
-  // with the allowed methods/headers here, or the browser blocks
-  // the actual request entirely — even though our real POST/GET
-  // handlers would have worked fine.
+  // POST /rules, POST /target, and POST /run-test calls with a JSON
+  // body), asking permission before sending the real request. We
+  // must respond with the allowed methods/headers here, or the
+  // browser blocks the actual request entirely — even though our
+  // real POST/GET handlers would have worked fine.
   if (clientReq.method === "OPTIONS") {
     clientRes.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     clientRes.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -178,6 +181,60 @@ const server = http.createServer(async (clientReq, clientRes) => {
     return;
   }
 
+  // --- ACTION: run a burst of test requests against ourselves ---
+  // Lets the dashboard trigger traffic directly, instead of the user
+  // needing a separate curl loop in a terminal. Fires `count` requests
+  // at our own /path (on this same proxy, port 3000), spaced by
+  // intervalMs, so they pass through the exact same chaos logic as
+  // any other request and show up live on the dashboard as they run.
+  if (clientReq.url === "/run-test" && clientReq.method === "POST") {
+    let body = "";
+
+    clientReq.on("data", (chunk) => {
+      body += chunk;
+    });
+
+    clientReq.on("end", () => {
+      try {
+        const {
+          path = "/hello",
+          count = 10,
+          intervalMs = 200,
+        } = JSON.parse(body || "{}");
+
+        // Respond immediately — the burst runs in the background.
+        // The dashboard will see each request's outcome arrive live
+        // via Socket.IO as it completes, same as any other traffic.
+        clientRes.writeHead(200, { "Content-Type": "application/json" });
+        clientRes.end(JSON.stringify({ started: true, count, path }));
+
+        // Fire the requests one at a time, waiting intervalMs between
+        // each, targeting our own proxy (localhost:3000) so they go
+        // through the full chaos/metrics/assertion pipeline normally.
+        (async () => {
+          for (let i = 0; i < count; i++) {
+            http
+              .get(`http://localhost:3000${path}`, (res) => {
+                res.resume(); // drain the response body so it doesn't hang open
+              })
+              .on("error", () => {
+                // Individual connection errors here are ignored —
+                // any real failure is already tracked via
+                // recordMetric() inside the main handler itself.
+              });
+
+            await sleep(intervalMs);
+          }
+        })();
+      } catch (err) {
+        clientRes.writeHead(400, { "Content-Type": "application/json" });
+        clientRes.end(JSON.stringify({ error: "Invalid JSON body" }));
+      }
+    });
+
+    return;
+  }
+
   // --- CHAOS CHECK #1: Fake failure ---
   // Roll the dice against failChance, scaled by the current ramp
   // intensity (0 to 1). So the effective failure probability isn't
@@ -266,7 +323,9 @@ const server = http.createServer(async (clientReq, clientRes) => {
 });
 
 server.listen(3000, () => {
-  console.log(`Chaos proxy running on :3000 -> forwarding to : ${targetConfig.host}:${targetConfig.port}`);
+  console.log(
+    `Chaos proxy running on :3000 -> forwarding to : ${targetConfig.host}:${targetConfig.port}`,
+  );
 });
 
 // Attach a Socket.IO server to the same underlying HTTP server, so
