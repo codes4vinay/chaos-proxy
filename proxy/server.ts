@@ -17,12 +17,20 @@
  * into this server rather than as a separate process, since a
  * separate process wouldn't share this in-memory chaosRules object.
  *
+ * A Socket.IO server is also attached to this same HTTP server, so
+ * every request outcome (success, delay, failure) is pushed live to
+ * any connected dashboard the instant it happens — instead of the
+ * dashboard having to repeatedly poll /stats to find out what
+ * changed. This is what makes the dashboard feel "live" rather than
+ * refreshing on a timer.
+ *
  * Built using Node's built-in `http` module directly (no `http-proxy`
  * library) so the actual request/response streaming is handled
  * explicitly rather than hidden behind a library.
  */
 
 import http from "http";
+import { Server } from "socket.io";
 import { chaosRules } from "./chaosRules";
 import { recordMetric, getStats } from "./metrics";
 import { checkAssertions, getTriggerHistory } from "./assertions";
@@ -76,7 +84,7 @@ const server = http.createServer(async (clientReq, clientRes) => {
   // is a shared, mutable object that every request reads from, this
   // change takes effect immediately on the very next request — no
   // restart needed.
-  
+
   if (clientReq.url === "/rules" && clientReq.method === "POST") {
     // Unlike GET requests, POST requests carry a body — but Node's
     // raw http module doesn't parse it for us automatically (Express
@@ -120,6 +128,15 @@ const server = http.createServer(async (clientReq, clientRes) => {
     clientRes.writeHead(500, { "Content-Type": "text/plain" });
     clientRes.end("Injected failure");
     recordMetric(Date.now() - startTime, true); // log this as a failure
+
+    // Push this outcome live to any connected dashboard, the instant
+    // it happens, instead of waiting for the next /stats poll.
+    io.emit("request-event", {
+      durationMs: Date.now() - startTime,
+      failed: true,
+      timestamp: Date.now(),
+    });
+
     return; // stop here — do not forward this request at all
   }
 
@@ -153,6 +170,13 @@ const server = http.createServer(async (clientReq, clientRes) => {
     // instead of loading it all into memory first.
     targetRes.pipe(clientRes);
     recordMetric(Date.now() - startTime, false); // log this as a success
+
+    // Push this successful outcome live to any connected dashboard.
+    io.emit("request-event", {
+      durationMs: Date.now() - startTime,
+      failed: false,
+      timestamp: Date.now(),
+    });
   });
 
   // If the target service is down or unreachable, don't crash —
@@ -162,6 +186,13 @@ const server = http.createServer(async (clientReq, clientRes) => {
     clientRes.writeHead(502, { "Content-Type": "text/plain" });
     clientRes.end("Bad Gateway - target service unreachable");
     recordMetric(Date.now() - startTime, true); // log this as a failure too
+
+    // Push this failure live too, same as the other two outcomes.
+    io.emit("request-event", {
+      durationMs: Date.now() - startTime,
+      failed: true,
+      timestamp: Date.now(),
+    });
   });
 
   // Stream the incoming request body (from the client) onward to the
@@ -172,6 +203,16 @@ const server = http.createServer(async (clientReq, clientRes) => {
 
 server.listen(3000, () => {
   console.log("Chaos proxy running on :3000 -> forwarding to :4000");
+});
+
+// Attach a Socket.IO server to the same underlying HTTP server, so
+// both plain HTTP requests (curl, the proxy logic above) and
+// WebSocket connections (the React dashboard) can share port 3000.
+// cors is opened up since the dashboard runs on a different port
+// (localhost:5173) during development, which counts as a different
+// origin to the browser.
+const io = new Server(server, {
+  cors: { origin: "*" },
 });
 
 // Runs every 2 seconds, independent of the server's own request

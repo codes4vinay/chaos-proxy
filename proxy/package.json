@@ -15,5 +15,8 @@
     "@types/node": "^26.1.2",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.3"
   }
 }
