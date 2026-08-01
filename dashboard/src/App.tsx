@@ -16,7 +16,7 @@ function App() {
       <header className="dash-header">
         <div className="dash-title">
           <span className="dash-title-main">CHAOS PROXY</span>
-          <span className="dash-title-sub">live traffic console</span>
+          <span className="dash-title-sub">Live traffic console</span>
         </div>
         <StatusPill connected={connected} />
       </header>

@@ -262,16 +262,59 @@ body {
 .run-test-card {
     grid-column: 1 / -1;
     display: grid;
-    grid-template-columns: 2fr 1fr 1fr 160px;
-    align-items: end;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(0, 0.8fr) auto;
+    align-items: start;
+    gap: 12px;
 }
 
 .run-test-card .control-card-title {
     grid-column: 1 / -1;
 }
 
+.run-test-card .run-test-field {
+    gap: 6px;
+}
+
+.run-test-card .run-test-checkbox {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid #1e2730;
+    border-radius: 6px;
+    background: #0d1218;
+    align-items: flex-start;
+}
+
+.run-test-card .checkbox-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #e8edf2;
+    font-size: 12px;
+}
+
+.run-test-card .run-test-checkbox input[type="checkbox"] {
+    width: auto;
+    accent-color: #00d9a3;
+}
+
+.run-test-card .muted-text {
+    font-size: 10px;
+    color: #5b6672;
+    letter-spacing: 0.02em;
+}
+
+.run-test-card input.is-disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    background: #080b10;
+}
+
 .run-test-card button {
     margin-top: 0;
+    min-height: 34px;
 }
 
 .control-card-title {
@@ -346,6 +389,11 @@ body {
     .control-grid,
     .run-test-card {
         grid-template-columns: 1fr;
+    }
+
+    .run-test-card .run-test-checkbox,
+    .run-test-card button {
+        grid-column: 1 / -1;
     }
 
     .run-test-card button {
